@@ -20,6 +20,6 @@
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/core:target-partitions": ["aws", "aws-cn"],
     "githubRepo": "tfcsamples/cfnsamples",
-    "connectionArn": "arn:aws:codeconnections:us-west-2:977620544723:connection/7ca4cd1f-2ffa-4c81-9fa8-93f1e8730e2f"
+    "connectionArn": "arn:aws:codeconnections:us-west-2:xxxxxxxxxxxx:connection/7ca4cd1f-2ffa-4c81-9fa8-93f1e8730e2f"
   }
 }
