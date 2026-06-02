@@ -1,0 +1,10 @@
+*.js
+!jest.config.ts
+*.d.ts
+node_modules
+dist
+cdk.out
+.cdk.staging
+*.tsbuildinfo
+.kiro
+.vscode
