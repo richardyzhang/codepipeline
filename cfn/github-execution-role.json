@@ -1,0 +1,112 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Creates the githubExecutionRole for cross-account CloudFormation deployments from the pipeline account (237713356231)",
+  "Parameters": {
+    "PipelineAccountId": {
+      "Type": "String",
+      "Default": "912333642649",
+      "Description": "AWS Account ID where the CI/CD pipeline runs"
+    }
+  },
+  "Resources": {
+    "GithubExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": "githubExecutionRole",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Sub": "arn:aws:iam::${PipelineAccountId}:root"
+                }
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringLike": {
+                  "aws:PrincipalArn": [
+                    {
+                      "Fn::Sub": "arn:aws:iam::${PipelineAccountId}:role/CfnConditionalDeployPipel-*"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "CloudFormationDeployPolicy",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "CloudFormationFullAccess",
+                  "Effect": "Allow",
+                  "Action": [
+                    "cloudformation:CreateChangeSet",
+                    "cloudformation:DeleteChangeSet",
+                    "cloudformation:DescribeChangeSet",
+                    "cloudformation:DescribeStacks",
+                    "cloudformation:DescribeStackEvents",
+                    "cloudformation:ExecuteChangeSet",
+                    "cloudformation:GetTemplate",
+                    "cloudformation:GetTemplateSummary",
+                    "cloudformation:ListChangeSets"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "EC2Permissions",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:*"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "IAMPassRole",
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:PassRole"
+                  ],
+                  "Resource": "*",
+                  "Condition": {
+                    "StringEquals": {
+                      "iam:PassedToService": "cloudformation.amazonaws.com"
+                    }
+                  }
+                },
+                {
+                  "Sid": "SSMReadAccess",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ssm:GetParameter",
+                    "ssm:GetParameters"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "RoleArn": {
+      "Description": "ARN of the githubExecutionRole",
+      "Value": {
+        "Fn::GetAtt": ["GithubExecutionRole", "Arn"]
+      }
+    },
+    "RoleName": {
+      "Description": "Name of the role",
+      "Value": {
+        "Ref": "GithubExecutionRole"
+      }
+    }
+  }
+}

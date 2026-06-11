@@ -12,6 +12,7 @@ import { generateChangeDetectBuildSpec } from './codebuild/change-detect-buildsp
 import { generateChangesetCreateBuildSpec } from './codebuild/changeset-create-buildspec';
 import { generateDeployBuildSpec } from './codebuild/deploy-buildspec';
 import { generateRejectionCleanupBuildSpec } from './codebuild/rejection-cleanup-buildspec';
+import { generateTemplateValidateBuildSpec } from './codebuild/template-validate-buildspec';
 
 /**
  * Props for the CfnConditionalDeployPipelineStack.
@@ -27,6 +28,8 @@ export interface CfnConditionalDeployPipelineStackProps extends cdk.StackProps {
   readonly connectionArn: string;
   /** Email address for SNS notifications (optional) */
   readonly notificationEmail?: string;
+  /** Path to stack-mapping.json relative to the source artifact root (default: 'stack-mapping.json') */
+  readonly stackMappingPath?: string;
 }
 
 /**
@@ -45,6 +48,8 @@ export class CfnConditionalDeployPipelineStack extends cdk.Stack {
   public readonly changeManifestArtifact: codepipeline.Artifact;
   /** The changeset summary artifact output from the Changeset Creation stage */
   public readonly changesetSummaryArtifact: codepipeline.Artifact;
+  /** The validation report artifact output from the Template Validation stage */
+  public readonly validationReportArtifact: codepipeline.Artifact;
   /** The SNS topic for approval notifications */
   public readonly approvalTopic: sns.Topic;
   /** The SNS topic for pipeline execution notifications (success/failure) */
@@ -61,6 +66,9 @@ export class CfnConditionalDeployPipelineStack extends cdk.Stack {
 
     // Changeset summary artifact produced by the Changeset Creation stage
     this.changesetSummaryArtifact = new codepipeline.Artifact('ChangesetSummaryArtifact');
+
+    // Validation report artifact produced by the Template Validation stage
+    this.validationReportArtifact = new codepipeline.Artifact('ValidationReportArtifact');
 
     // Parse owner and repo from the githubRepo string
     const [owner, repo] = props.githubRepo.split('/');
@@ -89,6 +97,24 @@ export class CfnConditionalDeployPipelineStack extends cdk.Stack {
       },
     });
 
+    // Grant SSM permissions for account resolution from /cfn-deploy/accounts/{folder}
+    changeDetectProject.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['ssm:GetParameter'],
+        resources: ['arn:aws:ssm:*:*:parameter/cfn-deploy/accounts/*'],
+      }),
+    );
+
+    // Grant STS GetCallerIdentity to resolve the pipeline account ID
+    changeDetectProject.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['sts:GetCallerIdentity'],
+        resources: ['*'],
+      }),
+    );
+
     // Change Detection action — pass CHANGED_FILES via action env vars so pipeline variable is resolved
     const changeDetectAction = new codepipeline_actions.CodeBuildAction({
       actionName: 'Detect_Changes',
@@ -101,6 +127,39 @@ export class CfnConditionalDeployPipelineStack extends cdk.Stack {
           value: '#{variables.CHANGED_FILES}',
         },
       },
+    });
+
+    // --- Template Validation Stage ---
+    // CodeBuild project that validates CloudFormation templates before changeset creation
+    // Validates: Requirements 1.1, 1.2, 1.3, 1.4, 8.1, 8.2, 8.3, 8.4, 8.5, 8.6
+    const stackMappingPath = props.stackMappingPath ?? 'stack-mapping.json';
+
+    const templateValidateProject = new codebuild.PipelineProject(this, 'TemplateValidateProject', {
+      projectName: 'cfn-template-validation',
+      description: 'Validates CloudFormation templates before changeset creation',
+      buildSpec: generateTemplateValidateBuildSpec(stackMappingPath),
+      environment: {
+        buildImage: codebuild.LinuxBuildImage.STANDARD_7_0,
+        computeType: codebuild.ComputeType.SMALL,
+      },
+    });
+
+    // Grant CloudFormation ValidateTemplate permission
+    templateValidateProject.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['cloudformation:ValidateTemplate'],
+        resources: ['*'],
+      }),
+    );
+
+    // Template Validation action
+    const templateValidateAction = new codepipeline_actions.CodeBuildAction({
+      actionName: 'Validate_Templates',
+      project: templateValidateProject,
+      input: this.sourceArtifact,
+      extraInputs: [this.changeManifestArtifact],
+      outputs: [this.validationReportArtifact],
     });
 
     // --- Changeset Creation Stage ---
@@ -143,6 +202,15 @@ export class CfnConditionalDeployPipelineStack extends cdk.Stack {
       }),
     );
 
+    // Grant STS AssumeRole for cross-account deployments
+    changesetCreateProject.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['sts:AssumeRole'],
+        resources: ['arn:aws:iam::*:role/githubExecutionRole'],
+      }),
+    );
+
     // Changeset Creation action
     const changesetCreateAction = new codepipeline_actions.CodeBuildAction({
       actionName: 'Create_Changesets',
@@ -150,6 +218,7 @@ export class CfnConditionalDeployPipelineStack extends cdk.Stack {
       input: this.sourceArtifact,
       extraInputs: [this.changeManifestArtifact],
       outputs: [this.changesetSummaryArtifact],
+      variablesNamespace: 'ChangesetCreation',
     });
 
     // --- Manual Approval Stage ---
@@ -171,7 +240,7 @@ export class CfnConditionalDeployPipelineStack extends cdk.Stack {
     const manualApprovalAction = new codepipeline_actions.ManualApprovalAction({
       actionName: 'Review_Changesets',
       notificationTopic: this.approvalTopic,
-      additionalInformation: 'Review the CloudFormation change sets created in the previous stage. Check the changeset summary for details on planned resource changes before approving deployment.',
+      additionalInformation: 'Pending change sets: #{ChangesetCreation.CHANGESET_INFO}',
     });
 
     // --- Deployment Stage ---
@@ -220,6 +289,15 @@ export class CfnConditionalDeployPipelineStack extends cdk.Stack {
       }),
     );
 
+    // Grant STS AssumeRole for cross-account deployments
+    deployProject.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['sts:AssumeRole'],
+        resources: ['arn:aws:iam::*:role/githubExecutionRole'],
+      }),
+    );
+
     // Deployment action
     const deployAction = new codepipeline_actions.CodeBuildAction({
       actionName: 'Execute_Changesets',
@@ -248,6 +326,10 @@ export class CfnConditionalDeployPipelineStack extends cdk.Stack {
         {
           stageName: 'ChangeDetection',
           actions: [changeDetectAction],
+        },
+        {
+          stageName: 'TemplateValidation',
+          actions: [templateValidateAction],
         },
         {
           stageName: 'ChangesetCreation',
@@ -341,6 +423,15 @@ export class CfnConditionalDeployPipelineStack extends cdk.Stack {
           'cloudformation:DescribeStacks',
         ],
         resources: ['*'],
+      }),
+    );
+
+    // Grant STS AssumeRole for cross-account cleanup
+    rejectionCleanupProject.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['sts:AssumeRole'],
+        resources: ['arn:aws:iam::*:role/githubExecutionRole'],
       }),
     );
 
