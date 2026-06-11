@@ -288,13 +288,19 @@ npx cdk deploy \
 
 **Option B: Using CloudFormation directly (no CDK)**
 
-If you don't want to install CDK, generate the CloudFormation template and deploy it with the AWS CLI:
+A pre-generated CloudFormation template is available at `cfn/pipeline-stack.yaml`. Replace the placeholder values and deploy:
 
 ```bash
-# 1. Update cdk.json with your values, then synthesize:
-npx cdk synth > cfn/pipeline-stack.yaml
+# 1. Replace placeholders in cfn/pipeline-stack.yaml:
+#    - CONNECTION_ARN_PLACEHOLDER  → your CodeStar Connection ARN
+#    - REPO_ID_PLACEHOLDER        → your GitHub owner/repo (e.g., myorg/myrepo)
+#    - BRANCH_PLACEHOLDER         → your branch name (e.g., main)
 
-# 2. Deploy using CloudFormation directly:
+sed -i 's|CONNECTION_ARN_PLACEHOLDER|arn:aws:codeconnections:us-west-2:111111111111:connection/abc-123|g' cfn/pipeline-stack.yaml
+sed -i 's|REPO_ID_PLACEHOLDER|myorg/myrepo|g' cfn/pipeline-stack.yaml
+sed -i 's|BRANCH_PLACEHOLDER|main|g' cfn/pipeline-stack.yaml
+
+# 2. Deploy:
 aws cloudformation deploy \
   --template-file cfn/pipeline-stack.yaml \
   --stack-name CfnConditionalDeployPipelineStack \
@@ -302,12 +308,11 @@ aws cloudformation deploy \
   --region us-west-2
 ```
 
-Alternatively, synthesize on any machine with Node.js, then deploy the generated YAML template from anywhere:
+To regenerate the template after making CDK code changes:
 
 ```bash
 npm install
-npx cdk synth --no-staging > pipeline.yaml
-# Copy pipeline.yaml to another machine or S3, then deploy with aws cloudformation deploy
+npx cdk synth --no-staging > cfn/pipeline-stack.yaml
 ```
 
 ### Bootstrap (if needed)
@@ -367,7 +372,8 @@ If templates have dependencies (defined in `stack-mapping.json` via `dependsOn`)
 ├── bin/
 │   └── app.ts                              # CDK app entry point
 ├── cfn/
-│   └── github-execution-role.json          # Cross-account role template (deploy in each target account)
+│   ├── github-execution-role.json          # Cross-account role template (deploy in each target account)
+│   └── pipeline-stack.yaml                 # Generated pipeline CloudFormation template (for non-CDK users)
 ├── lib/
 │   ├── cfn-conditional-deploy-pipeline-stack.ts  # Main CDK stack
 │   ├── template-validator.ts               # Pure validation module

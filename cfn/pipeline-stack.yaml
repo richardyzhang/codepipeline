@@ -1,0 +1,1559 @@
+# ============================================================
+# CFN Conditional Deploy Pipeline - CloudFormation Template
+# ============================================================
+# Generated from CDK. To deploy without CDK:
+#
+#   aws cloudformation deploy \
+#     --template-file cfn/pipeline-stack.yaml \
+#     --stack-name CfnConditionalDeployPipelineStack \
+#     --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+#     --parameter-overrides \
+#       ConnectionArn=arn:aws:codeconnections:us-west-2:ACCOUNT:connection/ID \
+#       FullRepositoryId=owner/repo \
+#       BranchName=main \
+#     --region us-west-2
+#
+# Before deploying, search and replace these values:
+#   - CONNECTION_ARN_PLACEHOLDER  → your CodeStar Connection ARN
+#   - REPO_ID_PLACEHOLDER        → your GitHub owner/repo (e.g., myorg/myrepo)
+#   - BRANCH_PLACEHOLDER         → your branch name (e.g., main)
+# ============================================================
+
+Resources:
+  ChangeDetectProjectRoleFFC3020D:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/ChangeDetectProject/Role/Resource
+  ChangeDetectProjectRoleDefaultPolicy121CF6C4:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              - Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":logs:us-west-2:"
+                    - Ref: AWS::AccountId
+                    - :log-group:/aws/codebuild/
+                    - Ref: ChangeDetectProject804AB3BE
+              - Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":logs:us-west-2:"
+                    - Ref: AWS::AccountId
+                    - :log-group:/aws/codebuild/
+                    - Ref: ChangeDetectProject804AB3BE
+                    - :*
+          - Action:
+              - codebuild:CreateReportGroup
+              - codebuild:CreateReport
+              - codebuild:UpdateReport
+              - codebuild:BatchPutTestCases
+              - codebuild:BatchPutCodeCoverages
+            Effect: Allow
+            Resource:
+              Fn::Join:
+                - ""
+                - - "arn:"
+                  - Ref: AWS::Partition
+                  - ":codebuild:us-west-2:"
+                  - Ref: AWS::AccountId
+                  - :report-group/
+                  - Ref: ChangeDetectProject804AB3BE
+                  - -*
+          - Action: ssm:GetParameter
+            Effect: Allow
+            Resource: arn:aws:ssm:*:*:parameter/cfn-deploy/accounts/*
+          - Action: sts:GetCallerIdentity
+            Effect: Allow
+            Resource: "*"
+          - Action:
+              - s3:GetObject*
+              - s3:GetBucket*
+              - s3:List*
+              - s3:DeleteObject*
+              - s3:PutObject
+              - s3:PutObjectLegalHold
+              - s3:PutObjectRetention
+              - s3:PutObjectTagging
+              - s3:PutObjectVersionTagging
+              - s3:Abort*
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - PipelineArtifactsBucket22248F97
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - PipelineArtifactsBucket22248F97
+                        - Arn
+                    - /*
+          - Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineArtifactsBucketEncryptionKey01D58D69
+                - Arn
+          - Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineArtifactsBucketEncryptionKey01D58D69
+                - Arn
+        Version: "2012-10-17"
+      PolicyName: ChangeDetectProjectRoleDefaultPolicy121CF6C4
+      Roles:
+        - Ref: ChangeDetectProjectRoleFFC3020D
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/ChangeDetectProject/Role/DefaultPolicy/Resource
+  ChangeDetectProject804AB3BE:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Filters provided changed files to build change manifest
+      EncryptionKey:
+        Fn::GetAtt:
+          - PipelineArtifactsBucketEncryptionKey01D58D69
+          - Arn
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      Name: cfn-change-detection
+      ServiceRole:
+        Fn::GetAtt:
+          - ChangeDetectProjectRoleFFC3020D
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "runtime-versions": {
+                  "nodejs": "18"
+                },
+                "commands": [
+                  "echo \"Installing jq for JSON processing\"",
+                  "apt-get update -qq && apt-get install -y -qq jq > /dev/null 2>&1 || true"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cat << 'SCRIPT' > /tmp/detect-changes.sh\n#!/bin/bash\nset -e\n\nREGION=\"us-west-2\"\nCHANGED_FILES_INPUT=\"$1\"\n\n# CHANGED_FILES must be provided\nif [ -z \"$CHANGED_FILES_INPUT\" ] || [ \"$CHANGED_FILES_INPUT\" = \"ALL\" ]; then\n  echo \"ERROR: CHANGED_FILES must be a comma-separated list of template paths (e.g., dev/ec2.json,prod/ec2.json)\"\n  exit 1\nfi\n\necho \"Processing changed files: $CHANGED_FILES_INPUT\"\n\n# Get pipeline account ID via STS GetCallerIdentity\necho \"Resolving pipeline account ID...\"\nPIPELINE_ACCOUNT_ID=$(aws sts get-caller-identity --region \"$REGION\" --query 'Account' --output text 2>&1)\nif [ $? -ne 0 ] || [ -z \"$PIPELINE_ACCOUNT_ID\" ]; then\n  echo \"ERROR: Failed to resolve pipeline account ID via STS GetCallerIdentity\"\n  echo \"$PIPELINE_ACCOUNT_ID\"\n  exit 1\nfi\necho \"Pipeline account ID: $PIPELINE_ACCOUNT_ID\"\n\n# Split comma-separated files and filter\nIFS=',' read -ra FILE_ARRAY <<< \"$CHANGED_FILES_INPUT\"\n\nCHANGED_TEMPLATES=\"[]\"\nSKIPPED_FILES=\"[]\"\n\nfor FILE_PATH in \"${FILE_ARRAY[@]}\"; do\n  # Trim whitespace\n  FILE_PATH=$(echo \"$FILE_PATH\" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')\n\n  # Skip empty entries\n  if [ -z \"$FILE_PATH\" ]; then\n    continue\n  fi\n\n  # Check if file ends with .json (case-insensitive)\n  LOWER_PATH=$(echo \"$FILE_PATH\" | tr '[:upper:]' '[:lower:]')\n  if [[ \"$LOWER_PATH\" != *.json ]]; then\n    echo \"Skipping non-JSON file: $FILE_PATH\"\n    SKIPPED_FILES=$(echo \"$SKIPPED_FILES\" | jq --arg f \"$FILE_PATH\" '. + [$f]')\n    continue\n  fi\n\n  # Validate template has at least one / (must reside in a folder)\n  if [[ \"$FILE_PATH\" != */* ]]; then\n    echo \"ERROR: Template '$FILE_PATH' does not reside in a folder. Templates must be in a folder (e.g., dev/ec2.json)\"\n    exit 1\n  fi\n\n  # Extract folder (first path segment)\n  FOLDER=$(echo \"$FILE_PATH\" | cut -d'/' -f1)\n\n  # Derive stack name: {folder}-{filename_without_extension}\n  FILENAME=$(basename \"$FILE_PATH\")\n  NAME_NO_EXT=\"${FILENAME%.*}\"\n  RAW_STACK_NAME=\"${FOLDER}-${NAME_NO_EXT}\"\n\n  # Sanitize for CloudFormation naming rules: [a-zA-Z][-a-zA-Z0-9]*\n  STACK_NAME=$(echo \"$RAW_STACK_NAME\" | sed 's/[^a-zA-Z0-9-]/-/g')\n  # Prepend cfn- if first character is not a letter\n  if [[ ! \"$STACK_NAME\" =~ ^[a-zA-Z] ]]; then\n    STACK_NAME=\"cfn-$STACK_NAME\"\n  fi\n  # Truncate to 128 characters\n  STACK_NAME=\"${STACK_NAME:0:128}\"\n\n  echo \"Template: $FILE_PATH -> folder=$FOLDER, stackName=$STACK_NAME\"\n\n  # Look up target account ID from SSM Parameter Store\n  SSM_PARAM_PATH=\"/cfn-deploy/accounts/$FOLDER\"\n  echo \"Looking up SSM parameter: $SSM_PARAM_PATH\"\n  TARGET_ACCOUNT_ID=$(aws ssm get-parameter --name \"$SSM_PARAM_PATH\" --region \"$REGION\" --query 'Parameter.Value' --output text 2>&1)\n  if [ $? -ne 0 ] || [ -z \"$TARGET_ACCOUNT_ID\" ] || [ \"$TARGET_ACCOUNT_ID\" = \"None\" ]; then\n    echo \"ERROR: SSM parameter '$SSM_PARAM_PATH' not found or empty. Cannot resolve target account for folder '$FOLDER'.\"\n    echo \"$TARGET_ACCOUNT_ID\"\n    exit 1\n  fi\n\n  # Validate account ID is a 12-digit numeric string\n  if ! echo \"$TARGET_ACCOUNT_ID\" | grep -qE '^[0-9]{12}$'; then\n    echo \"ERROR: SSM parameter '$SSM_PARAM_PATH' contains invalid account ID '$TARGET_ACCOUNT_ID'. Expected a 12-digit numeric string.\"\n    exit 1\n  fi\n\n  echo \"Resolved target account for folder '$FOLDER': $TARGET_ACCOUNT_ID\"\n\n  # Add entry to changedTemplates array\n  CHANGED_TEMPLATES=$(echo \"$CHANGED_TEMPLATES\" | jq \\\n    --arg tp \"$FILE_PATH\" \\\n    --arg sn \"$STACK_NAME\" \\\n    --arg fl \"$FOLDER\" \\\n    --arg ta \"$TARGET_ACCOUNT_ID\" \\\n    '. + [{\"templatePath\": $tp, \"stackName\": $sn, \"folder\": $fl, \"targetAccountId\": $ta}]')\ndone\n\n# Check if we have any templates to process\nTEMPLATE_COUNT=$(echo \"$CHANGED_TEMPLATES\" | jq 'length')\nif [ \"$TEMPLATE_COUNT\" -eq 0 ]; then\n  echo \"ERROR: No JSON templates found in changed files. All files were skipped.\"\n  # Still output the manifest for debugging\n  jq -n \\\n    --argjson templates \"$CHANGED_TEMPLATES\" \\\n    --arg pipelineAccount \"$PIPELINE_ACCOUNT_ID\" \\\n    --argjson skipped \"$SKIPPED_FILES\" \\\n    '{changedTemplates: $templates, pipelineAccountId: $pipelineAccount, skippedFiles: $skipped}' > change-manifest.json\n  cat change-manifest.json\n  exit 1\nfi\n\n# Build the enriched change manifest\njq -n \\\n  --argjson templates \"$CHANGED_TEMPLATES\" \\\n  --arg pipelineAccount \"$PIPELINE_ACCOUNT_ID\" \\\n  --argjson skipped \"$SKIPPED_FILES\" \\\n  '{changedTemplates: $templates, pipelineAccountId: $pipelineAccount, skippedFiles: $skipped}' > change-manifest.json\n\necho \"\"\necho \"=== Change Manifest ===\"\ncat change-manifest.json\necho \"\"\necho \"Processed $TEMPLATE_COUNT template(s), skipped $(echo \"$SKIPPED_FILES\" | jq 'length') file(s)\"\nSCRIPT\nchmod +x /tmp/detect-changes.sh",
+                  "/tmp/detect-changes.sh \"$CHANGED_FILES\""
+                ]
+              }
+            },
+            "artifacts": {
+              "base-directory": ".",
+              "files": [
+                "change-manifest.json"
+              ]
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/ChangeDetectProject/Resource
+  TemplateValidateProjectRole9A449B99:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/TemplateValidateProject/Role/Resource
+  TemplateValidateProjectRoleDefaultPolicy124C3232:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              - Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":logs:us-west-2:"
+                    - Ref: AWS::AccountId
+                    - :log-group:/aws/codebuild/
+                    - Ref: TemplateValidateProjectD5AD57C2
+              - Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":logs:us-west-2:"
+                    - Ref: AWS::AccountId
+                    - :log-group:/aws/codebuild/
+                    - Ref: TemplateValidateProjectD5AD57C2
+                    - :*
+          - Action:
+              - codebuild:CreateReportGroup
+              - codebuild:CreateReport
+              - codebuild:UpdateReport
+              - codebuild:BatchPutTestCases
+              - codebuild:BatchPutCodeCoverages
+            Effect: Allow
+            Resource:
+              Fn::Join:
+                - ""
+                - - "arn:"
+                  - Ref: AWS::Partition
+                  - ":codebuild:us-west-2:"
+                  - Ref: AWS::AccountId
+                  - :report-group/
+                  - Ref: TemplateValidateProjectD5AD57C2
+                  - -*
+          - Action: cloudformation:ValidateTemplate
+            Effect: Allow
+            Resource: "*"
+          - Action:
+              - s3:GetObject*
+              - s3:GetBucket*
+              - s3:List*
+              - s3:DeleteObject*
+              - s3:PutObject
+              - s3:PutObjectLegalHold
+              - s3:PutObjectRetention
+              - s3:PutObjectTagging
+              - s3:PutObjectVersionTagging
+              - s3:Abort*
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - PipelineArtifactsBucket22248F97
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - PipelineArtifactsBucket22248F97
+                        - Arn
+                    - /*
+          - Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineArtifactsBucketEncryptionKey01D58D69
+                - Arn
+          - Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineArtifactsBucketEncryptionKey01D58D69
+                - Arn
+        Version: "2012-10-17"
+      PolicyName: TemplateValidateProjectRoleDefaultPolicy124C3232
+      Roles:
+        - Ref: TemplateValidateProjectRole9A449B99
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/TemplateValidateProject/Role/DefaultPolicy/Resource
+  TemplateValidateProjectD5AD57C2:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Validates CloudFormation templates before changeset creation
+      EncryptionKey:
+        Fn::GetAtt:
+          - PipelineArtifactsBucketEncryptionKey01D58D69
+          - Arn
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      Name: cfn-template-validation
+      ServiceRole:
+        Fn::GetAtt:
+          - TemplateValidateProjectRole9A449B99
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "runtime-versions": {
+                  "nodejs": "18"
+                },
+                "commands": [
+                  "echo \"Installing jq for JSON processing\"",
+                  "apt-get update -qq && apt-get install -y -qq jq > /dev/null 2>&1 || true"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cat << 'SCRIPT' > /tmp/validate-templates.sh\n#!/bin/bash\nset -e\n\nCHANGE_MANIFEST_PATH=\"$CODEBUILD_SRC_DIR_ChangeManifestArtifact/change-manifest.json\"\nSTACK_MAPPING_PATH=\"$CODEBUILD_SRC_DIR/stack-mapping.json\"\nSOURCE_DIR=\"$CODEBUILD_SRC_DIR\"\n\n# Valid CloudFormation top-level keys\nVALID_CFN_KEYS=\"AWSTemplateFormatVersion Description Metadata Parameters Rules Mappings Conditions Transform Resources Outputs\"\n\necho \"=== Template Validation Stage ===\"\necho \"Change manifest: $CHANGE_MANIFEST_PATH\"\necho \"Stack mapping: $STACK_MAPPING_PATH\"\necho \"Source dir: $SOURCE_DIR\"\n\n# Read the change manifest\nif [ ! -f \"$CHANGE_MANIFEST_PATH\" ]; then\n  echo \"ERROR: change-manifest.json not found at $CHANGE_MANIFEST_PATH\"\n  exit 1\nfi\n\n# Read allChanged flag (defaults to false if not present)\nALL_CHANGED=$(jq -r '.allChanged // false' \"$CHANGE_MANIFEST_PATH\")\nCHANGED_COUNT=$(jq -r '.changedTemplates | length' \"$CHANGE_MANIFEST_PATH\")\n\necho \"Changed template count: $CHANGED_COUNT\"\necho \"All changed flag: $ALL_CHANGED\"\n\n# Handle empty manifest with allChanged=false: produce skipped report\nif [ \"$CHANGED_COUNT\" = \"0\" ] && [ \"$ALL_CHANGED\" != \"true\" ]; then\n  echo \"No templates changed and allChanged is false. Skipping validation.\"\n  jq -n '{summary: {totalTemplates: 0, passed: 0, failed: 0, status: \"skipped\"}, results: []}' > validation-report.json\n  cat validation-report.json\n  exit 0\nfi\n\n# Determine template paths to validate\nTEMPLATE_PATHS=\"[]\"\n\nif [ \"$ALL_CHANGED\" = \"true\" ]; then\n  echo \"allChanged is true: enumerating all templates from stack-mapping.json\"\n  if [ ! -f \"$STACK_MAPPING_PATH\" ]; then\n    echo \"ERROR: stack-mapping.json not found at $STACK_MAPPING_PATH\"\n    exit 1\n  fi\n  # Extract all templatePath values from stack-mapping.json\n  TEMPLATE_PATHS=$(jq '[.[].templatePath]' \"$STACK_MAPPING_PATH\")\nelse\n  # Use changedTemplates from the manifest\n  TEMPLATE_PATHS=$(jq '[.changedTemplates[].templatePath]' \"$CHANGE_MANIFEST_PATH\")\nfi\n\nTEMPLATE_COUNT=$(echo \"$TEMPLATE_PATHS\" | jq 'length')\necho \"Templates to validate: $TEMPLATE_COUNT\"\n\n# Initialize results\nRESULTS=\"[]\"\nFAILED=0\nPASSED=0\n\n# Function to call validate-template API with retry logic\nvalidate_template_api() {\n  local TEMPLATE_FILE=\"$1\"\n  local FILE_SIZE\n  FILE_SIZE=$(stat -f%z \"$TEMPLATE_FILE\" 2>/dev/null || stat --printf=\"%s\" \"$TEMPLATE_FILE\" 2>/dev/null)\n\n  local MAX_RETRIES=3\n  local RETRY_COUNT=0\n  local BACKOFF=1\n\n  # Check file size - if > 51200 bytes, report warning and skip API validation\n  if [ \"$FILE_SIZE\" -gt 51200 ]; then\n    echo \"  WARNING: Template exceeds 51,200 bytes ($FILE_SIZE bytes). Skipping API validation (URL-based not implemented).\"\n    echo \"warning\"\n    return 0\n  fi\n\n  while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do\n    local API_OUTPUT\n    API_OUTPUT=$(aws cloudformation validate-template --template-body \"file://$TEMPLATE_FILE\" 2>&1)\n    local EXIT_CODE=$?\n\n    if [ $EXIT_CODE -eq 0 ]; then\n      echo \"pass\"\n      return 0\n    fi\n\n    # Check if error is transient (Throttling or RequestTimeout)\n    if echo \"$API_OUTPUT\" | grep -qiE \"(Throttling|RequestTimeout|ThrottlingException|RequestTimeoutException)\"; then\n      RETRY_COUNT=$((RETRY_COUNT + 1))\n      if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then\n        echo \"  Transient error detected. Retrying in ${BACKOFF}s (attempt $RETRY_COUNT/$MAX_RETRIES)...\" >&2\n        sleep $BACKOFF\n        BACKOFF=$((BACKOFF * 2))\n      else\n        echo \"  Transient error persisted after $MAX_RETRIES retries.\" >&2\n        echo \"$API_OUTPUT\"\n        return 1\n      fi\n    else\n      # Non-transient error — return immediately\n      echo \"$API_OUTPUT\"\n      return 1\n    fi\n  done\n\n  echo \"$API_OUTPUT\"\n  return 1\n}\n\n# Validate each template\nfor i in $(seq 0 $(($TEMPLATE_COUNT - 1))); do\n  TEMPLATE_PATH=$(echo \"$TEMPLATE_PATHS\" | jq -r \".[$i]\")\n  FULL_PATH=\"$SOURCE_DIR/$TEMPLATE_PATH\"\n\n  echo \"\"\n  echo \"--- Validating: $TEMPLATE_PATH ---\"\n\n  ERRORS=\"[]\"\n  TEMPLATE_STATUS=\"passed\"\n\n  # Step 1: Check file existence\n  if [ ! -f \"$FULL_PATH\" ]; then\n    echo \"  ERROR: File not found: $TEMPLATE_PATH\"\n    ERRORS=$(echo \"$ERRORS\" | jq --arg msg \"Template file not found: $TEMPLATE_PATH\" '. + [{\"errorType\": \"file_not_found\", \"message\": $msg}]')\n    TEMPLATE_STATUS=\"failed\"\n    FAILED=$((FAILED + 1))\n    RESULTS=$(echo \"$RESULTS\" | jq --arg tp \"$TEMPLATE_PATH\" --arg st \"$TEMPLATE_STATUS\" --argjson errs \"$ERRORS\" '. + [{\"templatePath\": $tp, \"status\": $st, \"errors\": $errs}]')\n    continue\n  fi\n\n  # Step 2: Parse as JSON (check syntax)\n  JSON_ERROR=$(jq '.' \"$FULL_PATH\" 2>&1 >/dev/null)\n  if [ $? -ne 0 ]; then\n    echo \"  ERROR: Invalid JSON syntax\"\n    echo \"  $JSON_ERROR\"\n    ERRORS=$(echo \"$ERRORS\" | jq --arg msg \"$JSON_ERROR\" '. + [{\"errorType\": \"json_syntax\", \"message\": $msg}]')\n    TEMPLATE_STATUS=\"failed\"\n    FAILED=$((FAILED + 1))\n    RESULTS=$(echo \"$RESULTS\" | jq --arg tp \"$TEMPLATE_PATH\" --arg st \"$TEMPLATE_STATUS\" --argjson errs \"$ERRORS\" '. + [{\"templatePath\": $tp, \"status\": $st, \"errors\": $errs}]')\n    continue\n  fi\n\n  # Step 3: Validate structure - check for \"Resources\" key\n  HAS_RESOURCES=$(jq 'has(\"Resources\")' \"$FULL_PATH\")\n  if [ \"$HAS_RESOURCES\" != \"true\" ]; then\n    echo \"  ERROR: Missing required top-level \"Resources\" key\"\n    ERRORS=$(echo \"$ERRORS\" | jq '. + [{\"errorType\": \"missing_resources\", \"message\": \"Template is missing the required top-level \\\"Resources\\\" key\"}]')\n    TEMPLATE_STATUS=\"failed\"\n  fi\n\n  # Step 4: Check all top-level keys are valid CFN keys\n  TOP_LEVEL_KEYS=$(jq -r 'keys[]' \"$FULL_PATH\")\n  INVALID_KEYS=\"\"\n  for KEY in $TOP_LEVEL_KEYS; do\n    IS_VALID=false\n    for VALID_KEY in $VALID_CFN_KEYS; do\n      if [ \"$KEY\" = \"$VALID_KEY\" ]; then\n        IS_VALID=true\n        break\n      fi\n    done\n    if [ \"$IS_VALID\" = \"false\" ]; then\n      if [ -z \"$INVALID_KEYS\" ]; then\n        INVALID_KEYS=\"$KEY\"\n      else\n        INVALID_KEYS=\"$INVALID_KEYS, $KEY\"\n      fi\n    fi\n  done\n\n  if [ -n \"$INVALID_KEYS\" ]; then\n    echo \"  ERROR: Invalid top-level keys: $INVALID_KEYS\"\n    ERRORS=$(echo \"$ERRORS\" | jq --arg keys \"$INVALID_KEYS\" '. + [{\"errorType\": \"invalid_top_level_key\", \"message\": (\"Template contains invalid top-level keys: \" + $keys), \"location\": $keys}]')\n    TEMPLATE_STATUS=\"failed\"\n  fi\n\n  # If static checks failed, record result and continue\n  if [ \"$TEMPLATE_STATUS\" = \"failed\" ]; then\n    FAILED=$((FAILED + 1))\n    RESULTS=$(echo \"$RESULTS\" | jq --arg tp \"$TEMPLATE_PATH\" --arg st \"$TEMPLATE_STATUS\" --argjson errs \"$ERRORS\" '. + [{\"templatePath\": $tp, \"status\": $st, \"errors\": $errs}]')\n    continue\n  fi\n\n  # Step 5: Call aws cloudformation validate-template API\n  echo \"  Running CloudFormation validate-template API...\"\n  API_RESULT=$(validate_template_api \"$FULL_PATH\")\n  API_EXIT=$?\n\n  if [ \"$API_RESULT\" = \"warning\" ]; then\n    # Large file warning — still counts as passed for now\n    echo \"  Template passed static checks (API validation skipped due to size).\"\n    PASSED=$((PASSED + 1))\n    RESULTS=$(echo \"$RESULTS\" | jq --arg tp \"$TEMPLATE_PATH\" --arg st \"passed\" --argjson errs \"$ERRORS\" '. + [{\"templatePath\": $tp, \"status\": $st, \"errors\": $errs}]')\n  elif [ \"$API_RESULT\" = \"pass\" ]; then\n    echo \"  Template passed all validation checks.\"\n    PASSED=$((PASSED + 1))\n    RESULTS=$(echo \"$RESULTS\" | jq --arg tp \"$TEMPLATE_PATH\" --arg st \"passed\" --argjson errs \"$ERRORS\" '. + [{\"templatePath\": $tp, \"status\": $st, \"errors\": $errs}]')\n  else\n    echo \"  ERROR: CloudFormation validate-template API failed\"\n    echo \"  $API_RESULT\"\n    ERRORS=$(echo \"$ERRORS\" | jq --arg msg \"$API_RESULT\" '. + [{\"errorType\": \"api_error\", \"message\": $msg}]')\n    TEMPLATE_STATUS=\"failed\"\n    FAILED=$((FAILED + 1))\n    RESULTS=$(echo \"$RESULTS\" | jq --arg tp \"$TEMPLATE_PATH\" --arg st \"$TEMPLATE_STATUS\" --argjson errs \"$ERRORS\" '. + [{\"templatePath\": $tp, \"status\": $st, \"errors\": $errs}]')\n  fi\ndone\n\n# Determine overall status\nif [ $TEMPLATE_COUNT -eq 0 ]; then\n  OVERALL_STATUS=\"skipped\"\nelif [ $FAILED -gt 0 ]; then\n  OVERALL_STATUS=\"failed\"\nelse\n  OVERALL_STATUS=\"passed\"\nfi\n\n# Write validation report\njq -n \\\n  --argjson total \"$TEMPLATE_COUNT\" \\\n  --argjson passed \"$PASSED\" \\\n  --argjson failed \"$FAILED\" \\\n  --arg status \"$OVERALL_STATUS\" \\\n  --argjson results \"$RESULTS\" \\\n  '{summary: {totalTemplates: $total, passed: $passed, failed: $failed, status: $status}, results: $results}' > validation-report.json\n\necho \"\"\necho \"=== Validation Complete ===\"\necho \"Total: $TEMPLATE_COUNT, Passed: $PASSED, Failed: $FAILED, Status: $OVERALL_STATUS\"\necho \"\"\necho \"Validation report:\"\ncat validation-report.json\n\nif [ \"$FAILED\" -gt 0 ]; then\n  echo \"\"\n  echo \"ERROR: One or more templates failed validation.\"\n  exit 1\nfi\nSCRIPT\nchmod +x /tmp/validate-templates.sh",
+                  "/tmp/validate-templates.sh"
+                ]
+              }
+            },
+            "artifacts": {
+              "base-directory": ".",
+              "files": [
+                "validation-report.json"
+              ]
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/TemplateValidateProject/Resource
+  ChangesetCreateProjectRole1CC4989F:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/ChangesetCreateProject/Role/Resource
+  ChangesetCreateProjectRoleDefaultPolicyEF40627D:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              - Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":logs:us-west-2:"
+                    - Ref: AWS::AccountId
+                    - :log-group:/aws/codebuild/
+                    - Ref: ChangesetCreateProject42F9DDE3
+              - Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":logs:us-west-2:"
+                    - Ref: AWS::AccountId
+                    - :log-group:/aws/codebuild/
+                    - Ref: ChangesetCreateProject42F9DDE3
+                    - :*
+          - Action:
+              - codebuild:CreateReportGroup
+              - codebuild:CreateReport
+              - codebuild:UpdateReport
+              - codebuild:BatchPutTestCases
+              - codebuild:BatchPutCodeCoverages
+            Effect: Allow
+            Resource:
+              Fn::Join:
+                - ""
+                - - "arn:"
+                  - Ref: AWS::Partition
+                  - ":codebuild:us-west-2:"
+                  - Ref: AWS::AccountId
+                  - :report-group/
+                  - Ref: ChangesetCreateProject42F9DDE3
+                  - -*
+          - Action:
+              - cloudformation:CreateChangeSet
+              - cloudformation:DescribeChangeSet
+              - cloudformation:DeleteChangeSet
+              - cloudformation:DescribeStacks
+              - cloudformation:GetTemplate
+            Effect: Allow
+            Resource: "*"
+          - Action:
+              - ssm:GetParameters
+              - ssm:GetParameter
+            Effect: Allow
+            Resource: "*"
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Resource: arn:aws:iam::*:role/githubExecutionRole
+          - Action:
+              - s3:GetObject*
+              - s3:GetBucket*
+              - s3:List*
+              - s3:DeleteObject*
+              - s3:PutObject
+              - s3:PutObjectLegalHold
+              - s3:PutObjectRetention
+              - s3:PutObjectTagging
+              - s3:PutObjectVersionTagging
+              - s3:Abort*
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - PipelineArtifactsBucket22248F97
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - PipelineArtifactsBucket22248F97
+                        - Arn
+                    - /*
+          - Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineArtifactsBucketEncryptionKey01D58D69
+                - Arn
+          - Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineArtifactsBucketEncryptionKey01D58D69
+                - Arn
+        Version: "2012-10-17"
+      PolicyName: ChangesetCreateProjectRoleDefaultPolicyEF40627D
+      Roles:
+        - Ref: ChangesetCreateProjectRole1CC4989F
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/ChangesetCreateProject/Role/DefaultPolicy/Resource
+  ChangesetCreateProject42F9DDE3:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Creates CloudFormation change sets for stacks with changed templates
+      EncryptionKey:
+        Fn::GetAtt:
+          - PipelineArtifactsBucketEncryptionKey01D58D69
+          - Arn
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      Name: cfn-changeset-creation
+      ServiceRole:
+        Fn::GetAtt:
+          - ChangesetCreateProjectRole1CC4989F
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "runtime-versions": {
+                  "nodejs": "18"
+                },
+                "commands": [
+                  "echo \"Installing jq for JSON processing\"",
+                  "apt-get update -qq && apt-get install -y -qq jq > /dev/null 2>&1 || true"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cat << 'SCRIPT' > /tmp/create-changesets.sh\n#!/bin/bash\nset -e\n\nCHANGE_MANIFEST_PATH=\"$CODEBUILD_SRC_DIR_ChangeManifestArtifact/change-manifest.json\"\nSOURCE_DIR=\"$CODEBUILD_SRC_DIR\"\nCOMMIT_SHA=\"$CODEBUILD_RESOLVED_SOURCE_VERSION\"\nREGION=\"us-west-2\"\n\necho \"=== Changeset Creation Stage ===\"\necho \"Change manifest: $CHANGE_MANIFEST_PATH\"\necho \"Source dir: $SOURCE_DIR\"\necho \"Commit SHA: $COMMIT_SHA\"\necho \"Region: $REGION\"\n\n# Read the change manifest\nif [ ! -f \"$CHANGE_MANIFEST_PATH\" ]; then\n  echo \"ERROR: change-manifest.json not found at $CHANGE_MANIFEST_PATH\"\n  exit 1\nfi\n\nPIPELINE_ACCOUNT_ID=$(jq -r '.pipelineAccountId' \"$CHANGE_MANIFEST_PATH\")\nCHANGED_COUNT=$(jq -r '.changedTemplates | length' \"$CHANGE_MANIFEST_PATH\")\n\necho \"Pipeline account: $PIPELINE_ACCOUNT_ID\"\necho \"Found $CHANGED_COUNT changed template(s).\"\n\n# Handle empty manifest\nif [ \"$CHANGED_COUNT\" = \"0\" ]; then\n  echo \"No templates changed. Skipping changeset creation.\"\n  echo \"{\\\"changeSets\\\": [], \\\"pipelineAccountId\\\": \\\"$PIPELINE_ACCOUNT_ID\\\"}\" | jq . > changeset-summary.json\n  cat changeset-summary.json\n  exit 0\nfi\n\n# Generate a unique change set name suffix\nCS_SUFFIX=$(echo \"$COMMIT_SHA\" | cut -c 1-8)\nCS_PREFIX=\"pipeline-cs\"\n\n# Initialize changeset summary with pipelineAccountId\njq -n --arg pid \"$PIPELINE_ACCOUNT_ID\" '{changeSets: [], pipelineAccountId: $pid}' > changeset-summary.json\n\n# Function to reset credentials back to default (CodeBuild role)\nreset_credentials() {\n  unset AWS_ACCESS_KEY_ID\n  unset AWS_SECRET_ACCESS_KEY\n  unset AWS_SESSION_TOKEN\n  echo \"  Credentials reset to default CodeBuild role.\"\n}\n\n# Function to assume cross-account role\n# Returns 0 on success, 1 on failure\nassume_role_if_needed() {\n  local TARGET_ACCOUNT=\"$1\"\n  local PIPELINE_ACCOUNT=\"$2\"\n\n  if [ \"$TARGET_ACCOUNT\" != \"$PIPELINE_ACCOUNT\" ]; then\n    local ROLE_ARN=\"arn:aws:iam::${TARGET_ACCOUNT}:role/githubExecutionRole\"\n    echo \"  Cross-account deployment: assuming role $ROLE_ARN\"\n\n    local CREDS\n    CREDS=$(aws sts assume-role \\\n      --role-arn \"$ROLE_ARN\" \\\n      --role-session-name \"pipeline-changeset-create\" \\\n      --duration-seconds 3600 \\\n      --region \"$REGION\" \\\n      --output json 2>&1)\n\n    if [ $? -ne 0 ]; then\n      echo \"  ERROR: Failed to assume role $ROLE_ARN\"\n      echo \"  STS Error: $CREDS\"\n      return 1\n    fi\n\n    export AWS_ACCESS_KEY_ID=$(echo \"$CREDS\" | jq -r '.Credentials.AccessKeyId')\n    export AWS_SECRET_ACCESS_KEY=$(echo \"$CREDS\" | jq -r '.Credentials.SecretAccessKey')\n    export AWS_SESSION_TOKEN=$(echo \"$CREDS\" | jq -r '.Credentials.SessionToken')\n    echo \"  Successfully assumed role in account $TARGET_ACCOUNT\"\n  else\n    echo \"  Same-account deployment: using default CodeBuild credentials.\"\n  fi\n  return 0\n}\n\nFAILED=0\nfor i in $(seq 0 $(($CHANGED_COUNT - 1))); do\n  TEMPLATE_PATH=$(jq -r \".changedTemplates[$i].templatePath\" \"$CHANGE_MANIFEST_PATH\")\n  STACK_NAME=$(jq -r \".changedTemplates[$i].stackName\" \"$CHANGE_MANIFEST_PATH\")\n  TARGET_ACCOUNT_ID=$(jq -r \".changedTemplates[$i].targetAccountId\" \"$CHANGE_MANIFEST_PATH\")\n\n  CHANGE_SET_NAME=\"${CS_PREFIX}-${CS_SUFFIX}-$(echo \"$STACK_NAME\" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')\"\n\n  echo \"\"\n  echo \"--- Creating change set for stack: $STACK_NAME ---\"\n  echo \"  Template: $TEMPLATE_PATH\"\n  echo \"  Target account: $TARGET_ACCOUNT_ID\"\n  echo \"  Change set name: $CHANGE_SET_NAME\"\n\n  # Check if template file exists in source\n  if [ ! -f \"$SOURCE_DIR/$TEMPLATE_PATH\" ]; then\n    echo \"ERROR: Template file not found: $SOURCE_DIR/$TEMPLATE_PATH\"\n    FAILED=1\n    reset_credentials\n    continue\n  fi\n\n  # Assume cross-account role if needed\n  if ! assume_role_if_needed \"$TARGET_ACCOUNT_ID\" \"$PIPELINE_ACCOUNT_ID\"; then\n    echo \"  SKIPPING stack $STACK_NAME due to AssumeRole failure.\"\n    ENTRY=$(jq -n \\\n      --arg sn \"$STACK_NAME\" \\\n      --arg csn \"$CHANGE_SET_NAME\" \\\n      --arg aid \"$TARGET_ACCOUNT_ID\" \\\n      '{stackName: $sn, changeSetName: $csn, targetAccountId: $aid, changes: [], error: \"AssumeRole failed\"}')\n    jq --argjson entry \"$ENTRY\" '.changeSets += [$entry]' changeset-summary.json > changeset-summary-tmp.json\n    mv changeset-summary-tmp.json changeset-summary.json\n    FAILED=1\n    reset_credentials\n    continue\n  fi\n\n  # Check if stack exists (to determine CREATE vs UPDATE)\n  STACK_EXISTS=$(aws cloudformation describe-stacks --stack-name \"$STACK_NAME\" --region \"$REGION\" 2>/dev/null && echo \"yes\" || echo \"no\")\n  if [ \"$STACK_EXISTS\" = \"yes\" ]; then\n    CS_TYPE=\"UPDATE\"\n  else\n    CS_TYPE=\"CREATE\"\n  fi\n\n  echo \"  Change set type: $CS_TYPE\"\n\n  # Create the change set (no parameters, no tags)\n  if ! aws cloudformation create-change-set \\\n    --stack-name \"$STACK_NAME\" \\\n    --change-set-name \"$CHANGE_SET_NAME\" \\\n    --template-body \"file://$SOURCE_DIR/$TEMPLATE_PATH\" \\\n    --change-set-type \"$CS_TYPE\" \\\n    --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \\\n    --region \"$REGION\" 2>&1; then\n    echo \"ERROR: Failed to create change set for stack $STACK_NAME\"\n    FAILED=1\n    reset_credentials\n    continue\n  fi\n\n  # Wait for the change set to complete\n  echo \"  Waiting for change set to be created...\"\n  if ! aws cloudformation wait change-set-create-complete \\\n    --stack-name \"$STACK_NAME\" \\\n    --change-set-name \"$CHANGE_SET_NAME\" \\\n    --region \"$REGION\" 2>&1; then\n\n    CS_REASON=$(aws cloudformation describe-change-set \\\n      --stack-name \"$STACK_NAME\" \\\n      --change-set-name \"$CHANGE_SET_NAME\" \\\n      --region \"$REGION\" \\\n      --query 'StatusReason' --output text 2>/dev/null || echo \"Unknown reason\")\n\n    if echo \"$CS_REASON\" | grep -qi \"didn.t contain changes\\|No updates are to be performed\\|no changes\"; then\n      echo \"  No changes detected for stack $STACK_NAME. Skipping.\"\n      aws cloudformation delete-change-set \\\n        --stack-name \"$STACK_NAME\" \\\n        --change-set-name \"$CHANGE_SET_NAME\" \\\n        --region \"$REGION\" 2>/dev/null || true\n      reset_credentials\n      continue\n    else\n      echo \"ERROR: Change set creation failed for stack $STACK_NAME (Reason: $CS_REASON)\"\n      FAILED=1\n      reset_credentials\n      continue\n    fi\n  fi\n\n  # Describe the change set to get changes\n  CHANGES=$(aws cloudformation describe-change-set \\\n    --stack-name \"$STACK_NAME\" \\\n    --change-set-name \"$CHANGE_SET_NAME\" \\\n    --region \"$REGION\" \\\n    --query 'Changes[].ResourceChange.{action:Action,resourceType:ResourceType,logicalId:LogicalResourceId}' \\\n    --output json 2>/dev/null || echo \"[]\")\n\n  echo \"  Change set created successfully with $(echo \"$CHANGES\" | jq 'length') change(s).\"\n\n  # Append to changeset summary with targetAccountId\n  ENTRY=$(jq -n \\\n    --arg sn \"$STACK_NAME\" \\\n    --arg csn \"$CHANGE_SET_NAME\" \\\n    --arg aid \"$TARGET_ACCOUNT_ID\" \\\n    --argjson changes \"$CHANGES\" \\\n    '{stackName: $sn, changeSetName: $csn, targetAccountId: $aid, changes: $changes}')\n\n  jq --argjson entry \"$ENTRY\" '.changeSets += [$entry]' changeset-summary.json > changeset-summary-tmp.json\n  mv changeset-summary-tmp.json changeset-summary.json\n\n  # Reset credentials after each stack operation\n  reset_credentials\ndone\n\necho \"\"\necho \"=== Changeset Creation Complete ===\"\necho \"Changeset summary:\"\ncat changeset-summary.json\n\n# Export human-readable info for the Manual Approval popup\n# (actual export happens outside the script in the CodeBuild command)\necho \"Changeset info will be exported by CodeBuild after script completes.\"\n\nif [ \"$FAILED\" -ne 0 ]; then\n  echo \"ERROR: One or more change set creations failed.\"\n  exit 1\nfi\nSCRIPT\nchmod +x /tmp/create-changesets.sh",
+                  "/tmp/create-changesets.sh",
+                  "export CHANGESET_INFO=$(jq -r '.changeSets[] | \"Account: \\(.targetAccountId) | Stack: \\(.stackName) | ChangeSet: \\(.changeSetName)\"' changeset-summary.json | tr '\\n' '; ' | sed 's/; $//')",
+                  "if [ -z \"$CHANGESET_INFO\" ]; then export CHANGESET_INFO=\"No change sets created.\"; fi",
+                  "echo \"CHANGESET_INFO=$CHANGESET_INFO\""
+                ]
+              }
+            },
+            "env": {
+              "exported-variables": [
+                "CHANGESET_INFO"
+              ]
+            },
+            "artifacts": {
+              "base-directory": ".",
+              "files": [
+                "changeset-summary.json"
+              ]
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/ChangesetCreateProject/Resource
+  ApprovalTopic1D517B4C:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: CFN Conditional Deploy Pipeline - Approval Notifications
+      TopicName: cfn-deploy-approval-notifications
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/ApprovalTopic/Resource
+  DeployProjectRole588C8C1D:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/DeployProject/Role/Resource
+  DeployProjectRoleDefaultPolicy52AEA98B:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              - Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":logs:us-west-2:"
+                    - Ref: AWS::AccountId
+                    - :log-group:/aws/codebuild/
+                    - Ref: DeployProject1CF7CB79
+              - Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":logs:us-west-2:"
+                    - Ref: AWS::AccountId
+                    - :log-group:/aws/codebuild/
+                    - Ref: DeployProject1CF7CB79
+                    - :*
+          - Action:
+              - codebuild:CreateReportGroup
+              - codebuild:CreateReport
+              - codebuild:UpdateReport
+              - codebuild:BatchPutTestCases
+              - codebuild:BatchPutCodeCoverages
+            Effect: Allow
+            Resource:
+              Fn::Join:
+                - ""
+                - - "arn:"
+                  - Ref: AWS::Partition
+                  - ":codebuild:us-west-2:"
+                  - Ref: AWS::AccountId
+                  - :report-group/
+                  - Ref: DeployProject1CF7CB79
+                  - -*
+          - Action:
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:DescribeChangeSet
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackEvents
+              - cloudformation:GetTemplate
+              - cloudformation:DeleteChangeSet
+            Effect: Allow
+            Resource: "*"
+          - Action: iam:PassRole
+            Condition:
+              StringEquals:
+                iam:PassedToService: cloudformation.amazonaws.com
+            Effect: Allow
+            Resource: "*"
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Resource: arn:aws:iam::*:role/githubExecutionRole
+          - Action:
+              - s3:GetObject*
+              - s3:GetBucket*
+              - s3:List*
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - PipelineArtifactsBucket22248F97
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - PipelineArtifactsBucket22248F97
+                        - Arn
+                    - /*
+          - Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineArtifactsBucketEncryptionKey01D58D69
+                - Arn
+          - Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineArtifactsBucketEncryptionKey01D58D69
+                - Arn
+        Version: "2012-10-17"
+      PolicyName: DeployProjectRoleDefaultPolicy52AEA98B
+      Roles:
+        - Ref: DeployProjectRole588C8C1D
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/DeployProject/Role/DefaultPolicy/Resource
+  DeployProject1CF7CB79:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Description: Executes approved CloudFormation change sets in dependency order
+      EncryptionKey:
+        Fn::GetAtt:
+          - PipelineArtifactsBucketEncryptionKey01D58D69
+          - Arn
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      Name: cfn-deploy-changesets
+      ServiceRole:
+        Fn::GetAtt:
+          - DeployProjectRole588C8C1D
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "runtime-versions": {
+                  "nodejs": "18"
+                },
+                "commands": [
+                  "echo \"Installing jq for JSON processing\"",
+                  "apt-get update -qq && apt-get install -y -qq jq > /dev/null 2>&1 || true"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cat << 'SCRIPT' > /tmp/deploy-changesets.sh\n#!/bin/bash\nset -e\n\nCHANGESET_SUMMARY_PATH=\"$CODEBUILD_SRC_DIR_ChangesetSummaryArtifact/changeset-summary.json\"\nREGION=\"us-west-2\"\n\necho \"=== Deployment Stage ===\"\necho \"Changeset summary: $CHANGESET_SUMMARY_PATH\"\necho \"Region: $REGION\"\n\n# Read the changeset summary\nif [ ! -f \"$CHANGESET_SUMMARY_PATH\" ]; then\n  echo \"ERROR: changeset-summary.json not found at $CHANGESET_SUMMARY_PATH\"\n  exit 1\nfi\n\nPIPELINE_ACCOUNT_ID=$(jq -r '.pipelineAccountId' \"$CHANGESET_SUMMARY_PATH\")\nCHANGESET_COUNT=$(jq -r '.changeSets | length' \"$CHANGESET_SUMMARY_PATH\")\n\necho \"Pipeline account: $PIPELINE_ACCOUNT_ID\"\necho \"Found $CHANGESET_COUNT change set(s) to execute.\"\n\n# Handle empty changeset summary\nif [ \"$CHANGESET_COUNT\" = \"0\" ]; then\n  echo \"No change sets to execute. Skipping deployment.\"\n  jq -n --arg eid \"${CODEBUILD_BUILD_ID:-unknown}\" \\\n    '{executionId: $eid, deployedStacks: [], failedStacks: []}' > deployment-report.json\n  cat deployment-report.json\n  exit 0\nfi\n\n# Function to reset credentials back to default (CodeBuild role)\nreset_credentials() {\n  unset AWS_ACCESS_KEY_ID\n  unset AWS_SECRET_ACCESS_KEY\n  unset AWS_SESSION_TOKEN\n  echo \"  Credentials reset to default CodeBuild role.\"\n}\n\n# Function to assume cross-account role\n# Returns 0 on success, 1 on failure\nassume_role_if_needed() {\n  local TARGET_ACCOUNT=\"$1\"\n  local PIPELINE_ACCOUNT=\"$2\"\n\n  if [ \"$TARGET_ACCOUNT\" != \"$PIPELINE_ACCOUNT\" ]; then\n    local ROLE_ARN=\"arn:aws:iam::${TARGET_ACCOUNT}:role/githubExecutionRole\"\n    echo \"  Cross-account deployment: assuming role $ROLE_ARN\"\n\n    local CREDS\n    CREDS=$(aws sts assume-role \\\n      --role-arn \"$ROLE_ARN\" \\\n      --role-session-name \"pipeline-deploy\" \\\n      --duration-seconds 3600 \\\n      --region \"$REGION\" \\\n      --output json 2>&1)\n\n    if [ $? -ne 0 ]; then\n      echo \"  ERROR: Failed to assume role $ROLE_ARN\"\n      echo \"  STS Error: $CREDS\"\n      return 1\n    fi\n\n    export AWS_ACCESS_KEY_ID=$(echo \"$CREDS\" | jq -r '.Credentials.AccessKeyId')\n    export AWS_SECRET_ACCESS_KEY=$(echo \"$CREDS\" | jq -r '.Credentials.SecretAccessKey')\n    export AWS_SESSION_TOKEN=$(echo \"$CREDS\" | jq -r '.Credentials.SessionToken')\n    echo \"  Successfully assumed role in account $TARGET_ACCOUNT\"\n  else\n    echo \"  Same-account deployment: using default CodeBuild credentials.\"\n  fi\n  return 0\n}\n\n# Initialize result arrays\njq -n '{deployedStacks: [], failedStacks: []}' > /tmp/deploy-results.json\n\nfor i in $(seq 0 $(($CHANGESET_COUNT - 1))); do\n  STACK_NAME=$(jq -r \".changeSets[$i].stackName\" \"$CHANGESET_SUMMARY_PATH\")\n  CHANGE_SET_NAME=$(jq -r \".changeSets[$i].changeSetName\" \"$CHANGESET_SUMMARY_PATH\")\n  TARGET_ACCOUNT_ID=$(jq -r \".changeSets[$i].targetAccountId\" \"$CHANGESET_SUMMARY_PATH\")\n\n  echo \"\"\n  echo \"--- Executing change set '$CHANGE_SET_NAME' for stack '$STACK_NAME' ---\"\n  echo \"  Target account: $TARGET_ACCOUNT_ID\"\n\n  # Assume cross-account role if needed\n  if ! assume_role_if_needed \"$TARGET_ACCOUNT_ID\" \"$PIPELINE_ACCOUNT_ID\"; then\n    echo \"  SKIPPING stack $STACK_NAME due to AssumeRole failure.\"\n    ENTRY=$(jq -n \\\n      --arg sn \"$STACK_NAME\" \\\n      --arg aid \"$TARGET_ACCOUNT_ID\" \\\n      '{stackName: $sn, targetAccountId: $aid, status: \"FAILED\", error: \"AssumeRole failed\"}')\n    jq --argjson entry \"$ENTRY\" '.failedStacks += [$entry]' /tmp/deploy-results.json > /tmp/deploy-results-tmp.json\n    mv /tmp/deploy-results-tmp.json /tmp/deploy-results.json\n    reset_credentials\n    continue\n  fi\n\n  # Execute the change set\n  if ! aws cloudformation execute-change-set \\\n    --stack-name \"$STACK_NAME\" \\\n    --change-set-name \"$CHANGE_SET_NAME\" \\\n    --region \"$REGION\" 2>&1; then\n    echo \"  ERROR: Failed to execute change set for stack $STACK_NAME\"\n    ENTRY=$(jq -n \\\n      --arg sn \"$STACK_NAME\" \\\n      --arg aid \"$TARGET_ACCOUNT_ID\" \\\n      '{stackName: $sn, targetAccountId: $aid, status: \"FAILED\", error: \"Failed to execute change set\"}')\n    jq --argjson entry \"$ENTRY\" '.failedStacks += [$entry]' /tmp/deploy-results.json > /tmp/deploy-results-tmp.json\n    mv /tmp/deploy-results-tmp.json /tmp/deploy-results.json\n    reset_credentials\n    continue\n  fi\n\n  # Wait for stack to reach terminal state (60-minute timeout via --cli-read-timeout)\n  echo \"  Waiting for stack $STACK_NAME to complete (60-minute timeout)...\"\n\n  DEPLOY_SUCCESS=false\n\n  # Try waiting for stack-update-complete first\n  if aws cloudformation wait stack-update-complete \\\n    --stack-name \"$STACK_NAME\" \\\n    --region \"$REGION\" 2>/dev/null; then\n    echo \"  SUCCESS: Stack $STACK_NAME updated successfully.\"\n    DEPLOY_SUCCESS=true\n  else\n    # If update wait fails, try create-complete (new stack)\n    if aws cloudformation wait stack-create-complete \\\n      --stack-name \"$STACK_NAME\" \\\n      --region \"$REGION\" 2>/dev/null; then\n      echo \"  SUCCESS: Stack $STACK_NAME created successfully.\"\n      DEPLOY_SUCCESS=true\n    fi\n  fi\n\n  if [ \"$DEPLOY_SUCCESS\" = \"true\" ]; then\n    ENTRY=$(jq -n \\\n      --arg sn \"$STACK_NAME\" \\\n      --arg aid \"$TARGET_ACCOUNT_ID\" \\\n      '{stackName: $sn, targetAccountId: $aid, status: \"SUCCESS\"}')\n    jq --argjson entry \"$ENTRY\" '.deployedStacks += [$entry]' /tmp/deploy-results.json > /tmp/deploy-results-tmp.json\n    mv /tmp/deploy-results-tmp.json /tmp/deploy-results.json\n  else\n    # Check for failure terminal states\n    STACK_STATUS=$(aws cloudformation describe-stacks --stack-name \"$STACK_NAME\" \\\n      --region \"$REGION\" \\\n      --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo \"UNKNOWN\")\n    STACK_REASON=$(aws cloudformation describe-stacks --stack-name \"$STACK_NAME\" \\\n      --region \"$REGION\" \\\n      --query 'Stacks[0].StackStatusReason' --output text 2>/dev/null || echo \"Unknown reason\")\n\n    echo \"  ERROR: Stack $STACK_NAME failed (Status: $STACK_STATUS, Reason: $STACK_REASON)\"\n\n    ENTRY=$(jq -n \\\n      --arg sn \"$STACK_NAME\" \\\n      --arg aid \"$TARGET_ACCOUNT_ID\" \\\n      --arg status \"$STACK_STATUS\" \\\n      --arg err \"$STACK_REASON\" \\\n      '{stackName: $sn, targetAccountId: $aid, status: \"FAILED\", stackStatus: $status, error: $err}')\n    jq --argjson entry \"$ENTRY\" '.failedStacks += [$entry]' /tmp/deploy-results.json > /tmp/deploy-results-tmp.json\n    mv /tmp/deploy-results-tmp.json /tmp/deploy-results.json\n  fi\n\n  # Reset credentials after each stack (success or failure)\n  reset_credentials\ndone\n\necho \"\"\necho \"=== Deployment Complete ===\"\n\n# Build the final deployment report\nDEPLOYED=$(jq '.deployedStacks' /tmp/deploy-results.json)\nFAILED_STACKS=$(jq '.failedStacks' /tmp/deploy-results.json)\n\njq -n --arg eid \"${CODEBUILD_BUILD_ID:-unknown}\" \\\n  --argjson deployed \"$DEPLOYED\" \\\n  --argjson failed \"$FAILED_STACKS\" \\\n  '{executionId: $eid, deployedStacks: $deployed, failedStacks: $failed}' > deployment-report.json\n\necho \"Deployment report:\"\ncat deployment-report.json\n\n# Exit with failure if any stacks failed\nFAILED_COUNT=$(echo \"$FAILED_STACKS\" | jq 'length')\nif [ \"$FAILED_COUNT\" -gt 0 ]; then\n  echo \"\"\n  echo \"ERROR: $FAILED_COUNT stack deployment(s) failed.\"\n  exit 1\nfi\nSCRIPT\nchmod +x /tmp/deploy-changesets.sh",
+                  "/tmp/deploy-changesets.sh"
+                ]
+              }
+            },
+            "artifacts": {
+              "base-directory": ".",
+              "files": [
+                "deployment-report.json"
+              ]
+            }
+          }
+        Type: CODEPIPELINE
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/DeployProject/Resource
+  PipelineArtifactsBucketEncryptionKey01D58D69:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Statement:
+          - Action: kms:*
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":iam::"
+                    - Ref: AWS::AccountId
+                    - :root
+            Resource: "*"
+        Version: "2012-10-17"
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/ArtifactsBucketEncryptionKey/Resource
+  PipelineArtifactsBucketEncryptionKeyAlias5C510EEE:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/codepipeline-cfnconditionaldeploypipelinestackpipelinedfb9e2bc
+      TargetKeyId:
+        Fn::GetAtt:
+          - PipelineArtifactsBucketEncryptionKey01D58D69
+          - Arn
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/ArtifactsBucketEncryptionKeyAlias/Resource
+  PipelineArtifactsBucket22248F97:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID:
+                Fn::GetAtt:
+                  - PipelineArtifactsBucketEncryptionKey01D58D69
+                  - Arn
+              SSEAlgorithm: aws:kms
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/ArtifactsBucket/Resource
+  PipelineArtifactsBucketPolicyD4F9712A:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: PipelineArtifactsBucket22248F97
+      PolicyDocument:
+        Statement:
+          - Action: s3:*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+            Effect: Deny
+            Principal:
+              AWS: "*"
+            Resource:
+              - Fn::GetAtt:
+                  - PipelineArtifactsBucket22248F97
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - PipelineArtifactsBucket22248F97
+                        - Arn
+                    - /*
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/ArtifactsBucket/Policy/Resource
+  PipelineRoleD68726F7:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/Role/Resource
+  PipelineRoleDefaultPolicyC7A05455:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - s3:GetObject*
+              - s3:GetBucket*
+              - s3:List*
+              - s3:DeleteObject*
+              - s3:PutObject
+              - s3:PutObjectLegalHold
+              - s3:PutObjectRetention
+              - s3:PutObjectTagging
+              - s3:PutObjectVersionTagging
+              - s3:Abort*
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - PipelineArtifactsBucket22248F97
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - PipelineArtifactsBucket22248F97
+                        - Arn
+                    - /*
+          - Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineArtifactsBucketEncryptionKey01D58D69
+                - Arn
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineSourceGitHubSourceCodePipelineActionRole3B2287CE
+                - Arn
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineChangeDetectionDetectChangesCodePipelineActionRole3E5B5AFA
+                - Arn
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineTemplateValidationValidateTemplatesCodePipelineActionRole14DF714A
+                - Arn
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineChangesetCreationCreateChangesetsCodePipelineActionRole46F60AD2
+                - Arn
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineManualApprovalReviewChangesetsCodePipelineActionRole104AF00C
+                - Arn
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineDeploymentExecuteChangesetsCodePipelineActionRoleE63E39FF
+                - Arn
+        Version: "2012-10-17"
+      PolicyName: PipelineRoleDefaultPolicyC7A05455
+      Roles:
+        - Ref: PipelineRoleD68726F7
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/Role/DefaultPolicy/Resource
+  PipelineC660917D:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        EncryptionKey:
+          Id:
+            Fn::GetAtt:
+              - PipelineArtifactsBucketEncryptionKey01D58D69
+              - Arn
+          Type: KMS
+        Location:
+          Ref: PipelineArtifactsBucket22248F97
+        Type: S3
+      Name: cfn-conditional-deploy-pipeline
+      PipelineType: V2
+      RestartExecutionOnUpdate: true
+      RoleArn:
+        Fn::GetAtt:
+          - PipelineRoleD68726F7
+          - Arn
+      Stages:
+        - Actions:
+            - ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: CONNECTION_ARN_PLACEHOLDER
+                FullRepositoryId: REPO_ID_PLACEHOLDER
+                BranchName: BRANCH_PLACEHOLDER
+                DetectChanges: true
+              Name: GitHub_Source
+              OutputArtifacts:
+                - Name: SourceArtifact
+              RoleArn:
+                Fn::GetAtt:
+                  - PipelineSourceGitHubSourceCodePipelineActionRole3B2287CE
+                  - Arn
+              RunOrder: 1
+          Name: Source
+        - Actions:
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: ChangeDetectProject804AB3BE
+                EnvironmentVariables: '[{"name":"CHANGED_FILES","type":"PLAINTEXT","value":"#{variables.CHANGED_FILES}"}]'
+              InputArtifacts:
+                - Name: SourceArtifact
+              Name: Detect_Changes
+              OutputArtifacts:
+                - Name: ChangeManifestArtifact
+              RoleArn:
+                Fn::GetAtt:
+                  - PipelineChangeDetectionDetectChangesCodePipelineActionRole3E5B5AFA
+                  - Arn
+              RunOrder: 1
+          Name: ChangeDetection
+        - Actions:
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: TemplateValidateProjectD5AD57C2
+                PrimarySource: SourceArtifact
+              InputArtifacts:
+                - Name: SourceArtifact
+                - Name: ChangeManifestArtifact
+              Name: Validate_Templates
+              OutputArtifacts:
+                - Name: ValidationReportArtifact
+              RoleArn:
+                Fn::GetAtt:
+                  - PipelineTemplateValidationValidateTemplatesCodePipelineActionRole14DF714A
+                  - Arn
+              RunOrder: 1
+          Name: TemplateValidation
+        - Actions:
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: ChangesetCreateProject42F9DDE3
+                PrimarySource: SourceArtifact
+              InputArtifacts:
+                - Name: SourceArtifact
+                - Name: ChangeManifestArtifact
+              Name: Create_Changesets
+              Namespace: ChangesetCreation
+              OutputArtifacts:
+                - Name: ChangesetSummaryArtifact
+              RoleArn:
+                Fn::GetAtt:
+                  - PipelineChangesetCreationCreateChangesetsCodePipelineActionRole46F60AD2
+                  - Arn
+              RunOrder: 1
+          Name: ChangesetCreation
+        - Actions:
+            - ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: "1"
+              Configuration:
+                NotificationArn:
+                  Ref: ApprovalTopic1D517B4C
+                CustomData: "Pending change sets: #{ChangesetCreation.CHANGESET_INFO}"
+              Name: Review_Changesets
+              RoleArn:
+                Fn::GetAtt:
+                  - PipelineManualApprovalReviewChangesetsCodePipelineActionRole104AF00C
+                  - Arn
+              RunOrder: 1
+          Name: ManualApproval
+        - Actions:
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName:
+                  Ref: DeployProject1CF7CB79
+                PrimarySource: SourceArtifact
+              InputArtifacts:
+                - Name: SourceArtifact
+                - Name: ChangesetSummaryArtifact
+              Name: Execute_Changesets
+              RoleArn:
+                Fn::GetAtt:
+                  - PipelineDeploymentExecuteChangesetsCodePipelineActionRoleE63E39FF
+                  - Arn
+              RunOrder: 1
+          Name: Deployment
+      Variables:
+        - DefaultValue: ALL
+          Description: Comma-separated list of changed file paths, or "ALL" to deploy all stacks
+          Name: CHANGED_FILES
+    DependsOn:
+      - PipelineRoleDefaultPolicyC7A05455
+      - PipelineRoleD68726F7
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/Resource
+  PipelineSourceGitHubSourceCodePipelineActionRole3B2287CE:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::GetAtt:
+                  - PipelineRoleD68726F7
+                  - Arn
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/Source/GitHub_Source/CodePipelineActionRole/Resource
+  PipelineSourceGitHubSourceCodePipelineActionRoleDefaultPolicyE64B1C38:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action: codestar-connections:UseConnection
+            Effect: Allow
+            Resource: CONNECTION_ARN_PLACEHOLDER
+          - Action:
+              - s3:GetObject*
+              - s3:GetBucket*
+              - s3:List*
+              - s3:DeleteObject*
+              - s3:PutObject
+              - s3:PutObjectLegalHold
+              - s3:PutObjectRetention
+              - s3:PutObjectTagging
+              - s3:PutObjectVersionTagging
+              - s3:Abort*
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - PipelineArtifactsBucket22248F97
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - PipelineArtifactsBucket22248F97
+                        - Arn
+                    - /*
+          - Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineArtifactsBucketEncryptionKey01D58D69
+                - Arn
+          - Action:
+              - s3:PutObjectAcl
+              - s3:PutObjectVersionAcl
+            Effect: Allow
+            Resource:
+              Fn::Join:
+                - ""
+                - - Fn::GetAtt:
+                      - PipelineArtifactsBucket22248F97
+                      - Arn
+                  - /*
+        Version: "2012-10-17"
+      PolicyName: PipelineSourceGitHubSourceCodePipelineActionRoleDefaultPolicyE64B1C38
+      Roles:
+        - Ref: PipelineSourceGitHubSourceCodePipelineActionRole3B2287CE
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/Source/GitHub_Source/CodePipelineActionRole/DefaultPolicy/Resource
+  PipelineChangeDetectionDetectChangesCodePipelineActionRole3E5B5AFA:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::GetAtt:
+                  - PipelineRoleD68726F7
+                  - Arn
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/ChangeDetection/Detect_Changes/CodePipelineActionRole/Resource
+  PipelineChangeDetectionDetectChangesCodePipelineActionRoleDefaultPolicy19883077:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - codebuild:BatchGetBuilds
+              - codebuild:StartBuild
+              - codebuild:StopBuild
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - ChangeDetectProject804AB3BE
+                - Arn
+        Version: "2012-10-17"
+      PolicyName: PipelineChangeDetectionDetectChangesCodePipelineActionRoleDefaultPolicy19883077
+      Roles:
+        - Ref: PipelineChangeDetectionDetectChangesCodePipelineActionRole3E5B5AFA
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/ChangeDetection/Detect_Changes/CodePipelineActionRole/DefaultPolicy/Resource
+  PipelineTemplateValidationValidateTemplatesCodePipelineActionRole14DF714A:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::GetAtt:
+                  - PipelineRoleD68726F7
+                  - Arn
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/TemplateValidation/Validate_Templates/CodePipelineActionRole/Resource
+  PipelineTemplateValidationValidateTemplatesCodePipelineActionRoleDefaultPolicy12F6AB87:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - codebuild:BatchGetBuilds
+              - codebuild:StartBuild
+              - codebuild:StopBuild
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - TemplateValidateProjectD5AD57C2
+                - Arn
+        Version: "2012-10-17"
+      PolicyName: PipelineTemplateValidationValidateTemplatesCodePipelineActionRoleDefaultPolicy12F6AB87
+      Roles:
+        - Ref: PipelineTemplateValidationValidateTemplatesCodePipelineActionRole14DF714A
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/TemplateValidation/Validate_Templates/CodePipelineActionRole/DefaultPolicy/Resource
+  PipelineChangesetCreationCreateChangesetsCodePipelineActionRole46F60AD2:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::GetAtt:
+                  - PipelineRoleD68726F7
+                  - Arn
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/ChangesetCreation/Create_Changesets/CodePipelineActionRole/Resource
+  PipelineChangesetCreationCreateChangesetsCodePipelineActionRoleDefaultPolicy9FBDAACD:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - codebuild:BatchGetBuilds
+              - codebuild:StartBuild
+              - codebuild:StopBuild
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - ChangesetCreateProject42F9DDE3
+                - Arn
+        Version: "2012-10-17"
+      PolicyName: PipelineChangesetCreationCreateChangesetsCodePipelineActionRoleDefaultPolicy9FBDAACD
+      Roles:
+        - Ref: PipelineChangesetCreationCreateChangesetsCodePipelineActionRole46F60AD2
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/ChangesetCreation/Create_Changesets/CodePipelineActionRole/DefaultPolicy/Resource
+  PipelineManualApprovalReviewChangesetsCodePipelineActionRole104AF00C:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::GetAtt:
+                  - PipelineRoleD68726F7
+                  - Arn
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/ManualApproval/Review_Changesets/CodePipelineActionRole/Resource
+  PipelineManualApprovalReviewChangesetsCodePipelineActionRoleDefaultPolicyEE568905:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action: sns:Publish
+            Effect: Allow
+            Resource:
+              Ref: ApprovalTopic1D517B4C
+        Version: "2012-10-17"
+      PolicyName: PipelineManualApprovalReviewChangesetsCodePipelineActionRoleDefaultPolicyEE568905
+      Roles:
+        - Ref: PipelineManualApprovalReviewChangesetsCodePipelineActionRole104AF00C
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/ManualApproval/Review_Changesets/CodePipelineActionRole/DefaultPolicy/Resource
+  PipelineDeploymentExecuteChangesetsCodePipelineActionRoleE63E39FF:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::GetAtt:
+                  - PipelineRoleD68726F7
+                  - Arn
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/Deployment/Execute_Changesets/CodePipelineActionRole/Resource
+  PipelineDeploymentExecuteChangesetsCodePipelineActionRoleDefaultPolicy99774751:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - codebuild:BatchGetBuilds
+              - codebuild:StartBuild
+              - codebuild:StopBuild
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - DeployProject1CF7CB79
+                - Arn
+        Version: "2012-10-17"
+      PolicyName: PipelineDeploymentExecuteChangesetsCodePipelineActionRoleDefaultPolicy99774751
+      Roles:
+        - Ref: PipelineDeploymentExecuteChangesetsCodePipelineActionRoleE63E39FF
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/Pipeline/Deployment/Execute_Changesets/CodePipelineActionRole/DefaultPolicy/Resource
+  NotificationTopicEB7A0DF1:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: CFN Conditional Deploy Pipeline - Execution Notifications
+      TopicName: cfn-deploy-pipeline-notifications
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/NotificationTopic/Resource
+  NotificationTopicPolicyF935982E:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action: sns:Publish
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Resource:
+              Ref: NotificationTopicEB7A0DF1
+            Sid: "0"
+        Version: "2012-10-17"
+      Topics:
+        - Ref: NotificationTopicEB7A0DF1
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/NotificationTopic/Policy/Resource
+  PipelineNotificationRule6A969C3D:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Triggers SNS notification when the pipeline execution succeeds or fails
+      EventPattern:
+        source:
+          - aws.codepipeline
+        detail-type:
+          - CodePipeline Pipeline Execution State Change
+        detail:
+          pipeline:
+            - cfn-conditional-deploy-pipeline
+          state:
+            - SUCCEEDED
+            - FAILED
+      Name: cfn-deploy-pipeline-state-change
+      State: ENABLED
+      Targets:
+        - Arn:
+            Ref: NotificationTopicEB7A0DF1
+          Id: Target0
+          InputTransformer:
+            InputPathsMap:
+              detail-pipeline: $.detail.pipeline
+              detail-state: $.detail.state
+              detail-execution-id: $.detail.execution-id
+              region: $.region
+              account: $.account
+              time: $.time
+            InputTemplate: '{"pipeline":<detail-pipeline>,"state":<detail-state>,"executionId":<detail-execution-id>,"region":<region>,"account":<account>,"time":<time>}'
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/PipelineNotificationRule/Resource
+  RejectionCleanupProjectRole1641C0C7:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/RejectionCleanupProject/Role/Resource
+  RejectionCleanupProjectRoleDefaultPolicyF83A452E:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              - Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":logs:us-west-2:"
+                    - Ref: AWS::AccountId
+                    - :log-group:/aws/codebuild/
+                    - Ref: RejectionCleanupProjectE56807A0
+              - Fn::Join:
+                  - ""
+                  - - "arn:"
+                    - Ref: AWS::Partition
+                    - ":logs:us-west-2:"
+                    - Ref: AWS::AccountId
+                    - :log-group:/aws/codebuild/
+                    - Ref: RejectionCleanupProjectE56807A0
+                    - :*
+          - Action:
+              - codebuild:CreateReportGroup
+              - codebuild:CreateReport
+              - codebuild:UpdateReport
+              - codebuild:BatchPutTestCases
+              - codebuild:BatchPutCodeCoverages
+            Effect: Allow
+            Resource:
+              Fn::Join:
+                - ""
+                - - "arn:"
+                  - Ref: AWS::Partition
+                  - ":codebuild:us-west-2:"
+                  - Ref: AWS::AccountId
+                  - :report-group/
+                  - Ref: RejectionCleanupProjectE56807A0
+                  - -*
+          - Action:
+              - s3:GetObject*
+              - s3:GetBucket*
+              - s3:List*
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - PipelineArtifactsBucket22248F97
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - PipelineArtifactsBucket22248F97
+                        - Arn
+                    - /*
+          - Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - PipelineArtifactsBucketEncryptionKey01D58D69
+                - Arn
+          - Action:
+              - cloudformation:DeleteChangeSet
+              - cloudformation:DescribeChangeSet
+              - cloudformation:DescribeStacks
+            Effect: Allow
+            Resource: "*"
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Resource: arn:aws:iam::*:role/githubExecutionRole
+        Version: "2012-10-17"
+      PolicyName: RejectionCleanupProjectRoleDefaultPolicyF83A452E
+      Roles:
+        - Ref: RejectionCleanupProjectRole1641C0C7
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/RejectionCleanupProject/Role/DefaultPolicy/Resource
+  RejectionCleanupProjectE56807A0:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Cache:
+        Type: NO_CACHE
+      Description: Deletes pending change sets when manual approval is rejected or times out
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: ARTIFACT_BUCKET_NAME
+            Type: PLAINTEXT
+            Value:
+              Ref: PipelineArtifactsBucket22248F97
+        Image: aws/codebuild/standard:7.0
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: false
+        Type: LINUX_CONTAINER
+      Name: cfn-rejection-cleanup
+      ServiceRole:
+        Fn::GetAtt:
+          - RejectionCleanupProjectRole1641C0C7
+          - Arn
+      Source:
+        BuildSpec: |-
+          {
+            "version": "0.2",
+            "phases": {
+              "install": {
+                "runtime-versions": {
+                  "nodejs": "18"
+                },
+                "commands": [
+                  "echo \"Installing jq for JSON processing\"",
+                  "apt-get update -qq && apt-get install -y -qq jq > /dev/null 2>&1 || true"
+                ]
+              },
+              "build": {
+                "commands": [
+                  "cat << 'SCRIPT' > /tmp/cleanup-changesets.sh\n#!/bin/bash\nset -e\n\nREGION=\"us-west-2\"\n\necho \"=== Rejection Cleanup: Deleting Pending Change Sets ===\"\n\n# The changeset summary is retrieved from the artifact bucket\nARTIFACT_BUCKET=\"$ARTIFACT_BUCKET_NAME\"\nARTIFACT_KEY=\"$ARTIFACT_OBJECT_KEY\"\n\nif [ -z \"$ARTIFACT_BUCKET\" ] || [ -z \"$ARTIFACT_KEY\" ]; then\n  echo \"ERROR: ARTIFACT_BUCKET_NAME or ARTIFACT_OBJECT_KEY not set.\"\n  echo \"Attempting to find changeset-summary.json in the current directory...\"\n  if [ -f \"changeset-summary.json\" ]; then\n    SUMMARY_FILE=\"changeset-summary.json\"\n  else\n    echo \"WARNING: No changeset-summary.json found. Nothing to clean up.\"\n    exit 0\n  fi\nelse\n  echo \"Downloading changeset summary from s3://$ARTIFACT_BUCKET/$ARTIFACT_KEY\"\n  # Download and unzip the artifact\n  aws s3 cp \"s3://$ARTIFACT_BUCKET/$ARTIFACT_KEY\" /tmp/artifact.zip 2>&1 || {\n    echo \"WARNING: Failed to download artifact. Change sets may need manual cleanup.\"\n    exit 0\n  }\n  unzip -o /tmp/artifact.zip -d /tmp/artifact 2>&1 || {\n    echo \"WARNING: Failed to unzip artifact. Change sets may need manual cleanup.\"\n    exit 0\n  }\n  SUMMARY_FILE=$(find /tmp/artifact -name \"changeset-summary.json\" | head -1)\n  if [ -z \"$SUMMARY_FILE\" ]; then\n    echo \"WARNING: changeset-summary.json not found in artifact. Nothing to clean up.\"\n    exit 0\n  fi\nfi\n\necho \"Reading changeset summary from: $SUMMARY_FILE\"\ncat \"$SUMMARY_FILE\"\n\nCHANGESET_COUNT=$(jq -r '.changeSets | length' \"$SUMMARY_FILE\")\n\nif [ \"$CHANGESET_COUNT\" = \"0\" ]; then\n  echo \"No change sets to delete.\"\n  exit 0\nfi\n\necho \"\"\necho \"Found $CHANGESET_COUNT change set(s) to delete.\"\n\n# Get pipelineAccountId from the summary, fall back to STS GetCallerIdentity\nPIPELINE_ACCOUNT_ID=$(jq -r '.pipelineAccountId // empty' \"$SUMMARY_FILE\")\nif [ -z \"$PIPELINE_ACCOUNT_ID\" ]; then\n  echo \"pipelineAccountId not found in summary. Resolving via STS GetCallerIdentity...\"\n  PIPELINE_ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text --region \"$REGION\" 2>&1)\n  if [ $? -ne 0 ] || [ -z \"$PIPELINE_ACCOUNT_ID\" ]; then\n    echo \"ERROR: Failed to resolve pipeline account ID. Cannot determine cross-account context.\"\n    echo \"Proceeding with cleanup using default credentials only.\"\n    PIPELINE_ACCOUNT_ID=\"\"\n  fi\nfi\n\necho \"Pipeline account: $PIPELINE_ACCOUNT_ID\"\n\n# Function to reset credentials back to default (CodeBuild role)\nreset_credentials() {\n  unset AWS_ACCESS_KEY_ID\n  unset AWS_SECRET_ACCESS_KEY\n  unset AWS_SESSION_TOKEN\n  echo \"  Credentials reset to default CodeBuild role.\"\n}\n\n# Function to assume cross-account role\n# Returns 0 on success, 1 on failure\nassume_role_if_needed() {\n  local TARGET_ACCOUNT=\"$1\"\n  local PIPELINE_ACCOUNT=\"$2\"\n\n  if [ -n \"$PIPELINE_ACCOUNT\" ] && [ \"$TARGET_ACCOUNT\" != \"$PIPELINE_ACCOUNT\" ]; then\n    local ROLE_ARN=\"arn:aws:iam::${TARGET_ACCOUNT}:role/githubExecutionRole\"\n    echo \"  Cross-account cleanup: assuming role $ROLE_ARN\"\n\n    local CREDS\n    CREDS=$(aws sts assume-role \\\n      --role-arn \"$ROLE_ARN\" \\\n      --role-session-name \"pipeline-rejection-cleanup\" \\\n      --duration-seconds 3600 \\\n      --region \"$REGION\" \\\n      --output json 2>&1)\n\n    if [ $? -ne 0 ]; then\n      echo \"  ERROR: Failed to assume role $ROLE_ARN\"\n      echo \"  STS Error: $CREDS\"\n      return 1\n    fi\n\n    export AWS_ACCESS_KEY_ID=$(echo \"$CREDS\" | jq -r '.Credentials.AccessKeyId')\n    export AWS_SECRET_ACCESS_KEY=$(echo \"$CREDS\" | jq -r '.Credentials.SecretAccessKey')\n    export AWS_SESSION_TOKEN=$(echo \"$CREDS\" | jq -r '.Credentials.SessionToken')\n    echo \"  Successfully assumed role in account $TARGET_ACCOUNT\"\n  else\n    echo \"  Same-account cleanup: using default CodeBuild credentials.\"\n  fi\n  return 0\n}\n\n# Delete each change set\nERRORS=0\nfor i in $(seq 0 $((CHANGESET_COUNT - 1))); do\n  STACK_NAME=$(jq -r \".changeSets[$i].stackName\" \"$SUMMARY_FILE\")\n  CHANGE_SET_NAME=$(jq -r \".changeSets[$i].changeSetName\" \"$SUMMARY_FILE\")\n  TARGET_ACCOUNT_ID=$(jq -r \".changeSets[$i].targetAccountId // empty\" \"$SUMMARY_FILE\")\n\n  echo \"\"\n  echo \"--- Deleting change set '$CHANGE_SET_NAME' for stack '$STACK_NAME' ---\"\n  echo \"  Target account: ${TARGET_ACCOUNT_ID:-(same as pipeline)}\"\n\n  # Assume cross-account role if needed\n  if [ -n \"$TARGET_ACCOUNT_ID\" ]; then\n    if ! assume_role_if_needed \"$TARGET_ACCOUNT_ID\" \"$PIPELINE_ACCOUNT_ID\"; then\n      echo \"  SKIPPING cleanup of change set for stack $STACK_NAME due to AssumeRole failure.\"\n      ERRORS=$((ERRORS + 1))\n      reset_credentials\n      continue\n    fi\n  fi\n\n  # Delete the change set\n  if aws cloudformation delete-change-set \\\n    --stack-name \"$STACK_NAME\" \\\n    --change-set-name \"$CHANGE_SET_NAME\" \\\n    --region \"$REGION\" 2>&1; then\n    echo \"  Successfully deleted change set.\"\n  else\n    echo \"  WARNING: Failed to delete change set (may already be deleted or executed).\"\n    ERRORS=$((ERRORS + 1))\n  fi\n\n  # Reset credentials after each entry\n  reset_credentials\ndone\n\necho \"\"\necho \"=== Cleanup Complete ===\"\nif [ \"$ERRORS\" -gt 0 ]; then\n  echo \"Note: $ERRORS change set(s) could not be cleaned up (may already be gone or inaccessible).\"\nfi\nexit 0\nSCRIPT\nchmod +x /tmp/cleanup-changesets.sh",
+                  "/tmp/cleanup-changesets.sh"
+                ]
+              }
+            }
+          }
+        Type: NO_SOURCE
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/RejectionCleanupProject/Resource
+  RejectionCleanupProjectEventsRole95E47B26:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/RejectionCleanupProject/EventsRole/Resource
+  RejectionCleanupProjectEventsRoleDefaultPolicyBC57C653:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action: codebuild:StartBuild
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - RejectionCleanupProjectE56807A0
+                - Arn
+        Version: "2012-10-17"
+      PolicyName: RejectionCleanupProjectEventsRoleDefaultPolicyBC57C653
+      Roles:
+        - Ref: RejectionCleanupProjectEventsRole95E47B26
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/RejectionCleanupProject/EventsRole/DefaultPolicy/Resource
+  RejectionCleanupRuleC784B32F:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Triggers changeset cleanup when manual approval is rejected or times out
+      EventPattern:
+        source:
+          - aws.codepipeline
+        detail-type:
+          - CodePipeline Action Execution State Change
+        detail:
+          pipeline:
+            - cfn-conditional-deploy-pipeline
+          stage:
+            - ManualApproval
+          action:
+            - Review_Changesets
+          state:
+            - FAILED
+            - ABANDONED
+      Name: cfn-deploy-approval-rejection-cleanup
+      State: ENABLED
+      Targets:
+        - Arn:
+            Fn::GetAtt:
+              - RejectionCleanupProjectE56807A0
+              - Arn
+          Id: Target0
+          InputTransformer:
+            InputPathsMap:
+              detail-execution-id: $.detail.execution-id
+              detail-input-artifacts-0--s3Location-objectKey: $.detail.input-artifacts[0].s3Location.objectKey
+            InputTemplate: '{"environmentVariablesOverride":[{"name":"PIPELINE_EXECUTION_ID","value":<detail-execution-id>,"type":"PLAINTEXT"},{"name":"ARTIFACT_OBJECT_KEY","value":<detail-input-artifacts-0--s3Location-objectKey>,"type":"PLAINTEXT"}]}'
+          RoleArn:
+            Fn::GetAtt:
+              - RejectionCleanupProjectEventsRole95E47B26
+              - Arn
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/RejectionCleanupRule/Resource
+  CDKMetadata:
+    Type: AWS::CDK::Metadata
+    Properties:
+      Analytics: v2:deflate64:H4sIAAAAAAAA/02PQU/DMAyFf8vurhllSFyBI5eqcEdZaiS3aVLNzSYU+b+jpEHdJe97jhM/t9ieXvB4MDdp7DA1js+YPldjJzA3+U42DHSO7AZMHS/k2FN3CSPZFd5//D9WVWAzY+qDo3xbtAuO7W9pLqQgXjB9hYVtrm5Qzr31zirkCEudvacoP1ZWmGbB9EHlcZZXx0ayKaAgT5jeop2oxK60yT713ivQlfwqmPpYt4mOVBV8GAhHebi2J3x8xuNhFObmEv3KM2G/6R/ZjzpSVwEAAA==
+    Metadata:
+      aws:cdk:path: CfnConditionalDeployPipelineStack/CDKMetadata/Default
+Parameters:
+  BootstrapVersion:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /cdk-bootstrap/hnb659fds/version
+    Description: Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]
+
